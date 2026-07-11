@@ -173,6 +173,13 @@ const stateAttrb: StateAttr = {
 		role: 'state',
 		write: false,
 	},
+	JSONUpload: {
+		type: 'string',
+		name: 'JSON Upload',
+		role: 'text',
+		write: true,
+		def: '',
+	},
 };
 
 const BasicStates: MyObjects = {
@@ -292,4 +299,5 @@ function buildCommon(stateName: string): MyObjectsDefinitions {
 	return obj;
 }
 
-export { stateAttrb, BasicStates, MyObjectsDefinitions, buildCommon, MyObjects };
+export { BasicStates, buildCommon, MyObjects, MyObjectsDefinitions, stateAttrb };
+

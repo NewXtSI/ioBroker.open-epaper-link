@@ -58,7 +58,8 @@
       "zh-cn": "基于 ZBS243 的电子货架标签的替代固件和协议 - Solum / Samsung 的 ESL/价格标签。它可用于设置电子纸标签​​并为其提供内容。"
     },
     "authors": [
-      "DutchmanNL <oss@DrozmotiX.eu>"
+      "DutchmanNL <oss@DrozmotiX.eu>",
+      "NewXtSI <leerzeichen32@googlemail.com>"
     ],
     "keywords": [
       "epaper",

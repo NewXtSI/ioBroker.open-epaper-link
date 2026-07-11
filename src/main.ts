@@ -2,12 +2,16 @@
  * Created with @iobroker/create-adapter v2.5.0
  */
 
+import * as http from 'node:http';
+import * as https from 'node:https';
+
 type ApConnection = {
 	[key: string]: {
 		ip: string;
 		connection: WebSocket;
 		connectionStatus: string;
 		deviceName: string;
+		tagRefreshTimer?: NodeJS.Timeout;
 	};
 };
 
@@ -82,6 +86,7 @@ class OpenEpaperLink extends utils.Adapter {
 
 	private wsConnectionHandler(deviceIP: string, deviceName: string): void {
 		this.log.info(`Starting connection to ${deviceName} on IP ${deviceIP}`);
+		this.clearTagDatabaseRefreshTimer(deviceIP);
 		apConnection[deviceIP] = {
 			connection: new WebSocket(`ws://${deviceIP}/ws`),
 			connectionStatus: 'Connecting',
@@ -136,6 +141,11 @@ class OpenEpaperLink extends utils.Adapter {
 				'Access Point IP-Address',
 				apConnection[deviceIP].ip,
 			);
+
+			void this.refreshTagDatabase(deviceIP).catch((error) => {
+				this.log.warn(`Failed to load tag database from ${deviceIP}: ${error}`);
+			});
+			this.startTagDatabaseRefreshTimer(deviceIP);
 		});
 
 		apConnection[deviceIP].connection.on('message', (message: string) => {
@@ -158,33 +168,7 @@ class OpenEpaperLink extends utils.Adapter {
 				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 				// @ts-expect-error
 			} else if (message && message['tags']) {
-				//ToDO: Improvement required, channel creation for Tag ID should only be executed once
-				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-				// @ts-expect-error
-				modifiedMessage = message['tags'];
-				this.extendObject(`${apConnection[deviceIP].deviceName}.tags`, {
-					type: 'channel',
-					common: {
-						name: 'Tags',
-					},
-				});
-				//ToDO: Improvement required, channel creation for Tag ID should only be executed once
-				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-				// @ts-expect-error
-				this.extendObject(`${apConnection[deviceIP].deviceName}.tags.${message && message['tags'][0].mac}`, {
-					type: 'channel',
-					common: {
-						// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-						// @ts-expect-error
-						name: message['tags'][0].alias,
-					},
-				});
-				jsonExplorer.traverseJson(
-					modifiedMessage[0],
-					// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-					// @ts-expect-error
-					`${apConnection[deviceIP].deviceName}.tags.${message && message['tags'][0].mac}`,
-				);
+				this.applyTagList(deviceIP, message['tags']);
 			} else {
 				modifiedMessage = message;
 				jsonExplorer.traverseJson(modifiedMessage, apConnection[deviceIP].deviceName);
@@ -195,6 +179,7 @@ class OpenEpaperLink extends utils.Adapter {
 
 		apConnection[deviceIP].connection.on('close', () => {
 			this.log.info('Disconnected from server');
+			this.clearTagDatabaseRefreshTimer(deviceIP);
 			if (apConnection[deviceIP]) {
 				apConnection[deviceIP].connectionStatus = 'Disconnected';
 				jsonExplorer.stateSetCreate(`${apConnection[deviceIP].deviceName}._info.connected`, 'connected', false);
@@ -217,6 +202,7 @@ class OpenEpaperLink extends utils.Adapter {
 			for (const ap in apConnection) {
 				//ToDo: needs to be optimized, just quick & dirty for testing now
 				try {
+					this.clearTagDatabaseRefreshTimer(ap);
 					apConnection[ap].connection.close();
 				} catch (e) {
 					// no connection present
@@ -232,13 +218,60 @@ class OpenEpaperLink extends utils.Adapter {
 	/**
 	 * Is called if a subscribed state changes
 	 */
-	private onStateChange(id: string, state: ioBroker.State | null | undefined): void {
-		if (state) {
-			// The state was changed
-			this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
-		} else {
-			// The state was deleted
-			this.log.debug(`state ${id} deleted`);
+	private async onStateChange(id: string, state: ioBroker.State | null | undefined): Promise<void> {
+		if (!state || state.ack) {
+			return;
+		}
+
+		this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
+
+		if (!id.endsWith('.JSONUpload')) {
+			return;
+		}
+
+		const namespacePrefix = `${this.namespace}.`;
+		if (!id.startsWith(namespacePrefix)) {
+			return;
+		}
+
+		const relativeId = id.substring(namespacePrefix.length);
+		const tagMarker = '.tags.';
+		const tagMarkerIndex = relativeId.indexOf(tagMarker);
+		if (tagMarkerIndex === -1) {
+			return;
+		}
+
+		const deviceName = relativeId.substring(0, tagMarkerIndex);
+		const mac = relativeId.substring(tagMarkerIndex + tagMarker.length, relativeId.length - '.JSONUpload'.length);
+		if (!deviceName || !mac) {
+			return;
+		}
+
+		const connectionEntry = Object.values(apConnection).find((entry) => entry.deviceName === deviceName);
+		if (!connectionEntry) {
+			this.log.warn(`Cannot upload JSON for ${id}: access point ${deviceName} is not connected`);
+			return;
+		}
+
+		const jsonValue = String(state.val ?? '');
+		if (!jsonValue.trim()) {
+			this.log.warn(`Cannot upload empty JSON for ${id}`);
+			return;
+		}
+
+		try {
+			JSON.parse(jsonValue);
+		} catch (error) {
+			this.log.warn(`Cannot upload invalid JSON for ${id}: ${error}`);
+			return;
+		}
+
+		try {
+			await this.postJsonUpload(connectionEntry.ip, mac, jsonValue);
+			this.log.info(`Uploaded JSON for tag ${mac} via ${connectionEntry.ip}`);
+			this.setState(id, jsonValue, true);
+		} catch (error) {
+			this.log.warn(`JSON upload failed for ${id}: ${error}`);
 		}
 	}
 
@@ -247,7 +280,7 @@ class OpenEpaperLink extends utils.Adapter {
 	 * Some message was sent to this instance over message box. Used by email, pushover, text2speech, ...
 	 * Using this method requires "common.messagebox" property to be set to true in io-package.json
 	 */
-	private onMessage(obj: ioBroker.Message): void {
+	private async onMessage(obj: ioBroker.Message): Promise<void> {
 		this.log.debug('Data from configuration received : ' + JSON.stringify(obj));
 		if (typeof obj === 'object' && obj.message) {
 			this.log.debug('Data from configuration received : ' + JSON.stringify(obj));
@@ -277,6 +310,26 @@ class OpenEpaperLink extends utils.Adapter {
 							messageResponse[obj.message['apIP']] = obj;
 							this.wsConnectionHandler(obj.message['apIP'], obj.message['apName']);
 						}
+						break;
+					case 'refreshTagDatabase':
+						if (!obj.message['apIP'] || !apConnection[obj.message['apIP']]) {
+							this.sendTo(
+								obj.from,
+								obj.command,
+								{
+									error: 'Provided AP IP is not connected, refresh the AP connection first.',
+								},
+								obj.callback,
+							);
+							break;
+						}
+						await this.refreshTagDatabase(obj.message['apIP']);
+						this.sendTo(
+							obj.from,
+							obj.command,
+							{ result: 'OK - Tag database refreshed' },
+							obj.callback,
+						);
 						break;
 					//
 					case 'loadAccessPoints':
@@ -333,6 +386,7 @@ class OpenEpaperLink extends utils.Adapter {
 					case 'deleteAP':
 						messageResponse[obj.message['apIP']] = obj;
 						if (apConnection[obj.message['apIP']]) {
+							this.clearTagDatabaseRefreshTimer(obj.message['apIP']);
 							// Ensure all existing connections are closed, will trigger disconnect event to clean-up memory attributes
 							try {
 								if (apConnection[obj.message['apIP']].connection)
@@ -390,6 +444,142 @@ class OpenEpaperLink extends utils.Adapter {
 			ipAddress,
 		);
 	}
+
+	private async refreshTagDatabase(deviceIP: string): Promise<void> {
+		let position = 0;
+		let loadedTags = 0;
+
+		while (true) {
+			const response = await this.fetchJson<{ tags?: Array<Record<string, unknown>>; continu?: number }>(
+				`http://${deviceIP}/get_db?pos=${position}`,
+			);
+			if (!response) {
+				return;
+			}
+
+			const tags = Array.isArray(response.tags) ? response.tags : [];
+			this.applyTagList(deviceIP, tags);
+			loadedTags += tags.length;
+
+			if (typeof response.continu !== 'number' || response.continu <= position) {
+				break;
+			}
+
+			position = response.continu;
+		}
+
+		this.log.debug(`Loaded ${loadedTags} tags from AP ${deviceIP}`);
+	}
+
+	private applyTagList(deviceIP: string, tags: Array<Record<string, unknown>>): void {
+		this.extendObject(`${apConnection[deviceIP].deviceName}.tags`, {
+			type: 'channel',
+			common: {
+				name: 'Tags',
+			},
+		});
+
+		for (const tag of tags) {
+			this.applyTagRecord(deviceIP, tag);
+		}
+	}
+
+	private applyTagRecord(deviceIP: string, tag: Record<string, unknown>): void {
+		const mac = String(tag.mac ?? '').toUpperCase();
+		if (!mac) {
+			return;
+		}
+
+		this.extendObject(`${apConnection[deviceIP].deviceName}.tags.${mac}`, {
+			type: 'channel',
+			common: {
+				name: String(tag.alias ?? mac),
+			},
+		});
+		this.extendObject(`${apConnection[deviceIP].deviceName}.tags.${mac}.JSONUpload`, {
+			type: 'state',
+			common: {
+				name: 'JSON Upload',
+				type: 'string',
+				read: true,
+				write: true,
+				role: 'text',
+				def: '',
+			},
+			native: {},
+		});
+		this.setState(`${apConnection[deviceIP].deviceName}.tags.${mac}.JSONUpload`, '', true);
+		jsonExplorer.traverseJson(tag, `${apConnection[deviceIP].deviceName}.tags.${mac}`);
+	}
+
+	private async fetchJson<T>(url: string): Promise<T | null> {
+		return new Promise((resolve, reject) => {
+			const parsedUrl = new URL(url);
+			const client = parsedUrl.protocol === 'https:' ? https : http;
+
+			const request = client.get(parsedUrl, (response) => {
+				const statusCode = response.statusCode ?? 0;
+				if (statusCode < 200 || statusCode >= 300) {
+					response.resume();
+					reject(new Error(`HTTP ${statusCode}`));
+					return;
+				}
+
+				let responseBody = '';
+				response.setEncoding('utf8');
+				response.on('data', (chunk: string) => {
+					responseBody += chunk;
+				});
+				response.on('end', () => {
+					try {
+						resolve(JSON.parse(responseBody) as T);
+					} catch (error) {
+						reject(error);
+					}
+				});
+			});
+
+			request.on('error', (error) => reject(error));
+		});
+	}
+
+	private async postJsonUpload(deviceIP: string, mac: string, jsonValue: string): Promise<void> {
+		const response = await fetch(`http://${deviceIP}/jsonupload`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded',
+			},
+			body: new URLSearchParams({
+				mac,
+				json: jsonValue,
+			}),
+		});
+
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status}`);
+		}
+	}
+
+	private startTagDatabaseRefreshTimer(deviceIP: string): void {
+		this.clearTagDatabaseRefreshTimer(deviceIP);
+		if (!apConnection[deviceIP]) {
+			return;
+		}
+
+		apConnection[deviceIP].tagRefreshTimer = setInterval(() => {
+			void this.refreshTagDatabase(deviceIP).catch((error) => {
+				this.log.warn(`Failed to refresh tag database from ${deviceIP}: ${error}`);
+			});
+		}, 5 * 60 * 1000);
+	}
+
+	private clearTagDatabaseRefreshTimer(deviceIP: string): void {
+		if (apConnection[deviceIP]?.tagRefreshTimer) {
+			clearInterval(apConnection[deviceIP].tagRefreshTimer);
+			delete apConnection[deviceIP].tagRefreshTimer;
+		}
+	}
+
 }
 
 if (require.main !== module) {

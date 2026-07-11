@@ -18,13 +18,15 @@ See GitHub Project https://github.com/jjwbruijn/OpenEPaperLink
 
 ![image](https://github.com/DrozmotiX/iobroker.open-epaper-link/assets/3323812/7670ef2b-ab15-47c0-8bf8-dc70a9bdbf32)
 
-The adapter facilitates communication between the OEPL Access Point and iobroker to seamlessly integrate and interact. The resources offer crucial insights for efficient system operation.
+The adapter facilitates communication between the OEPL Access Point and ioBroker to seamlessly integrate and interact. The resources offer crucial insights for efficient system operation.
 
 It integrates all OpenEPaperLink displays and Access Points into the iobroker object structure, organizing them based on their MAC addresses.
 
-Within the iobroker system, a central "openepaperlink" folder groups all connected devices, each with its unique structure for targeted management.
+Within the ioBroker system, a central "openepaperlink" folder groups all connected devices, each with its unique structure for targeted management.
 
-This integration ensures a clear representation of all OpenEPaperLink devices in the iobroker system, allowing efficient management and control through the iobroker interface. 
+This integration ensures a clear representation of all OpenEPaperLink devices in the ioBroker system, allowing efficient management and control through the ioBroker interface. 
+
+This fork is actively maintained and currently in work in progress status. The focus is on reliable tag synchronization, periodic refresh, and write-back features for tag payloads.
 
 **For more information about OpenEPaperLink, valuable insights can be found at:**
 
@@ -37,7 +39,17 @@ https://www.youtube.com/watch?v=Etonkolz9Bs and https://www.youtube.com/watch?v=
 These resources offer a wealth of information and guidance on understanding and utilizing OpenEPaperLink effectively.
 
 > [!WARNING] Development status
-> This repository currently only has a basic "meta" adapter source and admin configuration framework which will be translated to a working solution during the next weeks.
+> This fork is work in progress. Core tag synchronization is available, and the adapter is being extended with additional write-back features.
+
+## Write-back support
+
+Each tag now gets a writable `JSONUpload` state below its channel. Write a valid JSON string to that state and the adapter sends it to the matching access point via `POST /jsonupload` with the `mac` and `json` form parameters.
+
+Example:
+
+```json
+{"text":"Hello from ioBroker"}
+```
 
 ## Changelog
 <!--
@@ -46,6 +58,8 @@ These resources offer a wealth of information and guidance on understanding and 
 -->
 
 ### **WORK IN PROGRESS**
+* (NewXtSI) Maintain the fork and extend the adapter with periodic tag sync and JSON upload write-back
+* (NewXtSI) Add per-tag `JSONUpload` state for AP push
 * (DutchmanNL) Ensure correct folder root for tag states
 
 ### 0.1.0 (2023-11-26)
