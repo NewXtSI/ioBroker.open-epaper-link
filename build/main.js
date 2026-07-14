@@ -136,7 +136,6 @@ class OpenEpaperLink extends utils.Adapter {
         "Access Point IP-Address",
         apConnection[deviceIP].ip
       );
-      this.setState(`${apConnection[deviceIP].deviceName}._info.ResetAP`, false, true);
       void this.refreshTagDatabase(deviceIP).catch((error) => {
         this.log.warn(`Failed to load tag database from ${deviceIP}: ${error}`);
       });

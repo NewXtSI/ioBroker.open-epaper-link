@@ -31,6 +31,95 @@ const stateAttrb = {
     write: true,
     def: 0
   },
+  connected: {
+    name: "Connected",
+    role: "indicator.connected",
+    type: "boolean",
+    write: false
+  },
+  "Access Point IP-Address": {
+    type: "string",
+    role: "info.ip",
+    write: false
+  },
+  heap: {
+    type: "number",
+    name: "Heap",
+    role: "value",
+    write: false
+  },
+  recordcount: {
+    type: "number",
+    name: "Record Count",
+    role: "value",
+    write: false
+  },
+  dbsize: {
+    type: "number",
+    name: "DB Size",
+    role: "value",
+    write: false
+  },
+  littlefsfree: {
+    type: "number",
+    name: "LittleFS Free",
+    role: "value.storage.free",
+    write: false
+  },
+  psfree: {
+    type: "number",
+    name: "PSRAM Free",
+    role: "value.memory",
+    write: false
+  },
+  apstate: {
+    type: "number",
+    name: "AP State",
+    role: "value",
+    write: false
+  },
+  runstate: {
+    type: "number",
+    name: "Run State",
+    role: "value",
+    write: false
+  },
+  rssi: {
+    type: "number",
+    name: "WiFi RSSI",
+    role: "value.signal",
+    write: false
+  },
+  wifistatus: {
+    type: "number",
+    name: "WiFi Status",
+    role: "value",
+    write: false
+  },
+  uptime: {
+    type: "number",
+    name: "Uptime",
+    role: "value.interval",
+    write: false
+  },
+  logMsg: {
+    type: "string",
+    name: "Log Message",
+    role: "text",
+    write: false
+  },
+  updatecount: {
+    type: "number",
+    name: "Update Count",
+    role: "value",
+    write: false
+  },
+  updatelast: {
+    type: "number",
+    name: "Last Update Timestamp",
+    role: "value.time",
+    write: false
+  },
   wifissid: {
     type: "string",
     role: "info",
@@ -67,9 +156,9 @@ const stateAttrb = {
     write: false
   },
   pending: {
-    type: "boolean",
+    type: "number",
     name: "Pending",
-    role: "state",
+    role: "value",
     write: false
   },
   alias: {
