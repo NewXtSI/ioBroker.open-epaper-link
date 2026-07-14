@@ -717,29 +717,12 @@ class OpenEpaperLink extends utils.Adapter {
 	}
 
 	private async restartAccessPoint(deviceIP: string): Promise<void> {
-		const restartCandidates = [
-			{ method: 'POST', path: '/reboot' },
-			{ method: 'GET', path: '/reboot' },
-			{ method: 'POST', path: '/restart' },
-			{ method: 'GET', path: '/restart' },
-		] as const;
-
-		let lastError = 'unknown error';
-		for (const candidate of restartCandidates) {
-			try {
-				const response = await fetch(`http://${deviceIP}${candidate.path}`, {
-					method: candidate.method,
-				});
-				if (response.ok) {
-					return;
-				}
-				lastError = `${candidate.method} ${candidate.path} returned HTTP ${response.status}`;
-			} catch (error) {
-				lastError = `${candidate.method} ${candidate.path} failed: ${error}`;
-			}
+		const response = await fetch(`http://${deviceIP}/reboot`, {
+			method: 'POST',
+		});
+		if (!response.ok) {
+			throw new Error(`POST /reboot returned HTTP ${response.status}`);
 		}
-
-		throw new Error(lastError);
 	}
 
 	private startTagDatabaseRefreshTimer(deviceIP: string): void {
