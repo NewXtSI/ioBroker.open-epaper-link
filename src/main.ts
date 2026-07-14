@@ -165,6 +165,18 @@ class OpenEpaperLink extends utils.Adapter {
 					name: 'Connection detail',
 				},
 			});
+			this.extendObject(`${apConnection[deviceIP].deviceName}._info.ResetAP`, {
+				type: 'state',
+				common: {
+					name: 'Restart Access Point',
+					type: 'boolean',
+					read: true,
+					write: true,
+					role: 'button',
+					def: false,
+				},
+				native: {},
+			});
 
 			jsonExplorer.stateSetCreate(`${apConnection[deviceIP].deviceName}._info.connected`, 'connected', true);
 			jsonExplorer.stateSetCreate(
@@ -172,6 +184,7 @@ class OpenEpaperLink extends utils.Adapter {
 				'Access Point IP-Address',
 				apConnection[deviceIP].ip,
 			);
+			this.setState(`${apConnection[deviceIP].deviceName}._info.ResetAP`, false, true);
 
 			void this.refreshTagDatabase(deviceIP).catch((error) => {
 				this.log.warn(`Failed to load tag database from ${deviceIP}: ${error}`);
@@ -182,26 +195,28 @@ class OpenEpaperLink extends utils.Adapter {
 		apConnection[deviceIP].connection.on('message', (message: string) => {
 			//ToDo: Design messageHandler to write values to states
 			this.log.debug(`Received message from server: ${message}`);
+			let parsedMessage: any;
 			try {
-				message = JSON.parse(message);
+				parsedMessage = JSON.parse(message);
 			} catch (e) {
 				this.log.error(`Cannot parse JSON ${message} | ${e}`);
+				return;
 			}
 			let modifiedMessage;
 
 			// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 			// @ts-expect-error
-			if (message && message['sys']) {
+			if (parsedMessage && parsedMessage['sys']) {
 				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 				// @ts-expect-error
-				modifiedMessage = message['sys'];
+				modifiedMessage = parsedMessage['sys'];
 				jsonExplorer.traverseJson(modifiedMessage, `${apConnection[deviceIP].deviceName}._info`);
 				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 				// @ts-expect-error
-			} else if (message && message['tags']) {
-				this.applyTagList(deviceIP, message['tags']);
+			} else if (parsedMessage && parsedMessage['tags']) {
+				this.applyTagList(deviceIP, parsedMessage['tags']);
 			} else {
-				modifiedMessage = message;
+				modifiedMessage = parsedMessage;
 				jsonExplorer.traverseJson(modifiedMessage, apConnection[deviceIP].deviceName);
 			}
 			apConnection[deviceIP].connectionStatus = 'Connected';
@@ -255,6 +270,39 @@ class OpenEpaperLink extends utils.Adapter {
 		}
 
 		this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
+
+		if (id.endsWith('._info.ResetAP')) {
+			const namespacePrefix = `${this.namespace}.`;
+			if (!id.startsWith(namespacePrefix)) {
+				return;
+			}
+
+			const relativeId = id.substring(namespacePrefix.length);
+			const resetSuffix = '._info.ResetAP';
+			const deviceName = relativeId.substring(0, relativeId.length - resetSuffix.length);
+			if (!deviceName || !state.val) {
+				return;
+			}
+
+			const connectedEntry = Object.values(apConnection).find((entry) => entry.deviceName === deviceName);
+			const configuredEntry = this.getConfiguredAccessPoints().find((entry) => entry.apName === deviceName);
+			const deviceIP = connectedEntry?.ip ?? configuredEntry?.ip;
+			if (!deviceIP) {
+				this.log.warn(`Cannot restart AP for ${id}: no IP configured for device ${deviceName}`);
+				this.setState(id, false, true);
+				return;
+			}
+
+			try {
+				await this.restartAccessPoint(deviceIP);
+				this.log.info(`Restart request sent to access point ${deviceName} (${deviceIP})`);
+			} catch (error) {
+				this.log.warn(`Failed to restart access point ${deviceName} (${deviceIP}): ${error}`);
+			}
+
+			this.setState(id, false, true);
+			return;
+		}
 
 		if (!id.endsWith('.JSONUpload')) {
 			return;
@@ -495,7 +543,10 @@ class OpenEpaperLink extends utils.Adapter {
 	}
 
 	private getConfiguredAccessPoints(): ConfiguredAccessPoint[] {
-		const configuredTable = Array.isArray(this.config.accessPointTable) ? this.config.accessPointTable : [];
+		const configWithAccessPoints = this.config as unknown as Record<string, unknown>;
+		const configuredTable = Array.isArray(configWithAccessPoints.accessPointTable)
+			? (configWithAccessPoints.accessPointTable as Array<Record<string, unknown>>)
+			: [];
 		const entriesByIp = new Map<string, ConfiguredAccessPoint>();
 
 		for (const entry of configuredTable) {
@@ -531,7 +582,7 @@ class OpenEpaperLink extends utils.Adapter {
 		instanceObject.native.accessPointTable = normalizedAccessPoints;
 		await this.setForeignObjectAsync(instanceObjectId, instanceObject);
 
-		this.config.accessPointTable = normalizedAccessPoints;
+		(this.config as unknown as Record<string, unknown>).accessPointTable = normalizedAccessPoints;
 	}
 
 	private async upsertConfiguredAccessPoint(apName: string, ip: string): Promise<void> {
@@ -663,6 +714,32 @@ class OpenEpaperLink extends utils.Adapter {
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status}`);
 		}
+	}
+
+	private async restartAccessPoint(deviceIP: string): Promise<void> {
+		const restartCandidates = [
+			{ method: 'POST', path: '/reboot' },
+			{ method: 'GET', path: '/reboot' },
+			{ method: 'POST', path: '/restart' },
+			{ method: 'GET', path: '/restart' },
+		] as const;
+
+		let lastError = 'unknown error';
+		for (const candidate of restartCandidates) {
+			try {
+				const response = await fetch(`http://${deviceIP}${candidate.path}`, {
+					method: candidate.method,
+				});
+				if (response.ok) {
+					return;
+				}
+				lastError = `${candidate.method} ${candidate.path} returned HTTP ${response.status}`;
+			} catch (error) {
+				lastError = `${candidate.method} ${candidate.path} failed: ${error}`;
+			}
+		}
+
+		throw new Error(lastError);
 	}
 
 	private startTagDatabaseRefreshTimer(deviceIP: string): void {

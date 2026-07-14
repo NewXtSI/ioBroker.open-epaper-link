@@ -118,12 +118,25 @@ class OpenEpaperLink extends utils.Adapter {
           name: "Connection detail"
         }
       });
+      this.extendObject(`${apConnection[deviceIP].deviceName}._info.ResetAP`, {
+        type: "state",
+        common: {
+          name: "Restart Access Point",
+          type: "boolean",
+          read: true,
+          write: true,
+          role: "button",
+          def: false
+        },
+        native: {}
+      });
       import_iobroker_jsonexplorer.default.stateSetCreate(`${apConnection[deviceIP].deviceName}._info.connected`, "connected", true);
       import_iobroker_jsonexplorer.default.stateSetCreate(
         `${apConnection[deviceIP].deviceName}._info.ip`,
         "Access Point IP-Address",
         apConnection[deviceIP].ip
       );
+      this.setState(`${apConnection[deviceIP].deviceName}._info.ResetAP`, false, true);
       void this.refreshTagDatabase(deviceIP).catch((error) => {
         this.log.warn(`Failed to load tag database from ${deviceIP}: ${error}`);
       });
@@ -131,19 +144,21 @@ class OpenEpaperLink extends utils.Adapter {
     });
     apConnection[deviceIP].connection.on("message", (message) => {
       this.log.debug(`Received message from server: ${message}`);
+      let parsedMessage;
       try {
-        message = JSON.parse(message);
+        parsedMessage = JSON.parse(message);
       } catch (e) {
         this.log.error(`Cannot parse JSON ${message} | ${e}`);
+        return;
       }
       let modifiedMessage;
-      if (message && message["sys"]) {
-        modifiedMessage = message["sys"];
+      if (parsedMessage && parsedMessage["sys"]) {
+        modifiedMessage = parsedMessage["sys"];
         import_iobroker_jsonexplorer.default.traverseJson(modifiedMessage, `${apConnection[deviceIP].deviceName}._info`);
-      } else if (message && message["tags"]) {
-        this.applyTagList(deviceIP, message["tags"]);
+      } else if (parsedMessage && parsedMessage["tags"]) {
+        this.applyTagList(deviceIP, parsedMessage["tags"]);
       } else {
-        modifiedMessage = message;
+        modifiedMessage = parsedMessage;
         import_iobroker_jsonexplorer.default.traverseJson(modifiedMessage, apConnection[deviceIP].deviceName);
       }
       apConnection[deviceIP].connectionStatus = "Connected";
@@ -173,11 +188,39 @@ class OpenEpaperLink extends utils.Adapter {
     }
   }
   async onStateChange(id, state) {
-    var _a;
+    var _a, _b;
     if (!state || state.ack) {
       return;
     }
     this.log.debug(`state ${id} changed: ${state.val} (ack = ${state.ack})`);
+    if (id.endsWith("._info.ResetAP")) {
+      const namespacePrefix2 = `${this.namespace}.`;
+      if (!id.startsWith(namespacePrefix2)) {
+        return;
+      }
+      const relativeId2 = id.substring(namespacePrefix2.length);
+      const resetSuffix = "._info.ResetAP";
+      const deviceName2 = relativeId2.substring(0, relativeId2.length - resetSuffix.length);
+      if (!deviceName2 || !state.val) {
+        return;
+      }
+      const connectedEntry = Object.values(apConnection).find((entry) => entry.deviceName === deviceName2);
+      const configuredEntry = this.getConfiguredAccessPoints().find((entry) => entry.apName === deviceName2);
+      const deviceIP = (_a = connectedEntry == null ? void 0 : connectedEntry.ip) != null ? _a : configuredEntry == null ? void 0 : configuredEntry.ip;
+      if (!deviceIP) {
+        this.log.warn(`Cannot restart AP for ${id}: no IP configured for device ${deviceName2}`);
+        this.setState(id, false, true);
+        return;
+      }
+      try {
+        await this.restartAccessPoint(deviceIP);
+        this.log.info(`Restart request sent to access point ${deviceName2} (${deviceIP})`);
+      } catch (error) {
+        this.log.warn(`Failed to restart access point ${deviceName2} (${deviceIP}): ${error}`);
+      }
+      this.setState(id, false, true);
+      return;
+    }
     if (!id.endsWith(".JSONUpload")) {
       return;
     }
@@ -201,7 +244,7 @@ class OpenEpaperLink extends utils.Adapter {
       this.log.warn(`Cannot upload JSON for ${id}: access point ${deviceName} is not connected`);
       return;
     }
-    const jsonValue = String((_a = state.val) != null ? _a : "");
+    const jsonValue = String((_b = state.val) != null ? _b : "");
     if (!jsonValue.trim()) {
       this.log.warn(`Cannot upload empty JSON for ${id}`);
       return;
@@ -373,7 +416,8 @@ class OpenEpaperLink extends utils.Adapter {
   }
   getConfiguredAccessPoints() {
     var _a, _b;
-    const configuredTable = Array.isArray(this.config.accessPointTable) ? this.config.accessPointTable : [];
+    const configWithAccessPoints = this.config;
+    const configuredTable = Array.isArray(configWithAccessPoints.accessPointTable) ? configWithAccessPoints.accessPointTable : [];
     const entriesByIp = /* @__PURE__ */ new Map();
     for (const entry of configuredTable) {
       if (!entry || typeof entry !== "object") {
@@ -517,6 +561,29 @@ class OpenEpaperLink extends utils.Adapter {
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
+  }
+  async restartAccessPoint(deviceIP) {
+    const restartCandidates = [
+      { method: "POST", path: "/reboot" },
+      { method: "GET", path: "/reboot" },
+      { method: "POST", path: "/restart" },
+      { method: "GET", path: "/restart" }
+    ];
+    let lastError = "unknown error";
+    for (const candidate of restartCandidates) {
+      try {
+        const response = await fetch(`http://${deviceIP}${candidate.path}`, {
+          method: candidate.method
+        });
+        if (response.ok) {
+          return;
+        }
+        lastError = `${candidate.method} ${candidate.path} returned HTTP ${response.status}`;
+      } catch (error) {
+        lastError = `${candidate.method} ${candidate.path} failed: ${error}`;
+      }
+    }
+    throw new Error(lastError);
   }
   startTagDatabaseRefreshTimer(deviceIP) {
     this.clearTagDatabaseRefreshTimer(deviceIP);
