@@ -15,6 +15,11 @@ type ApConnection = {
 	};
 };
 
+type ConfiguredAccessPoint = {
+	apName: string;
+	ip: string;
+};
+
 // The adapter-core module gives you access to the core ioBroker functions
 // you need to create an adapter
 import * as utils from '@iobroker/adapter-core';
@@ -54,9 +59,23 @@ class OpenEpaperLink extends utils.Adapter {
 		// Reset the connection indicator during startup
 		this.setState('info.connection', false, true);
 
-		// Try to connect to known devices
+		await this.connectConfiguredAccessPoints();
+
+		// Try to connect to known devices from object tree as fallback
 		await this.tryKnownDevices();
 		this.setState('info.connection', true, true);
+	}
+
+	private async connectConfiguredAccessPoints(): Promise<void> {
+		const configuredAccessPoints = this.getConfiguredAccessPoints();
+		if (!configuredAccessPoints.length) {
+			this.log.info('No configured access points found in adapter settings');
+			return;
+		}
+
+		for (const configuredAccessPoint of configuredAccessPoints) {
+			this.wsConnectionHandler(configuredAccessPoint.ip, configuredAccessPoint.apName);
+		}
 	}
 
 	// Try to contact and read data of already known devices
@@ -85,6 +104,18 @@ class OpenEpaperLink extends utils.Adapter {
 	}
 
 	private wsConnectionHandler(deviceIP: string, deviceName: string): void {
+		if (apConnection[deviceIP]?.connectionStatus === 'Connected' || apConnection[deviceIP]?.connectionStatus === 'Connecting') {
+			return;
+		}
+
+		if (apConnection[deviceIP]?.connection) {
+			try {
+				apConnection[deviceIP].connection.close();
+			} catch {
+				// Ignore close errors and continue with reconnect
+			}
+		}
+
 		this.log.info(`Starting connection to ${deviceName} on IP ${deviceIP}`);
 		this.clearTagDatabaseRefreshTimer(deviceIP);
 		apConnection[deviceIP] = {
@@ -307,6 +338,7 @@ class OpenEpaperLink extends utils.Adapter {
 							);
 						} else {
 							this.log.info(`Valid IP address received`);
+							await this.upsertConfiguredAccessPoint(obj.message['apName'], obj.message['apIP']);
 							messageResponse[obj.message['apIP']] = obj;
 							this.wsConnectionHandler(obj.message['apIP'], obj.message['apName']);
 						}
@@ -336,15 +368,23 @@ class OpenEpaperLink extends utils.Adapter {
 						{
 							let data = {};
 
-							const tableEntry = [];
-
+							const tableEntryByIp = new Map<string, { apName: string; ip: string; connectState: string }>();
+							for (const configuredAccessPoint of this.getConfiguredAccessPoints()) {
+								tableEntryByIp.set(configuredAccessPoint.ip, {
+									apName: configuredAccessPoint.apName,
+									ip: configuredAccessPoint.ip,
+									connectState: 'Disconnected',
+								});
+							}
 							for (const device in apConnection) {
-								tableEntry.push({
+								tableEntryByIp.set(apConnection[device].ip, {
 									apName: apConnection[device].deviceName,
 									ip: apConnection[device].ip,
 									connectState: apConnection[device].connectionStatus,
 								});
 							}
+
+							const tableEntry = Array.from(tableEntryByIp.values());
 
 							data = {
 								native: {
@@ -358,33 +398,46 @@ class OpenEpaperLink extends utils.Adapter {
 					// Front End message handler to load IP-Address dropDown with all current known devices
 					case 'getApName':
 						{
-							const dropDownEntry = [];
+							const dropDownEntryByName = new Map<string, { label: string; value: string }>();
+							for (const configuredAccessPoint of this.getConfiguredAccessPoints()) {
+								dropDownEntryByName.set(configuredAccessPoint.apName, {
+									label: configuredAccessPoint.apName,
+									value: configuredAccessPoint.apName,
+								});
+							}
 							for (const device in apConnection) {
-								dropDownEntry.push({
+								dropDownEntryByName.set(apConnection[device].deviceName, {
 									label: apConnection[device].deviceName,
 									value: apConnection[device].deviceName,
 								});
 							}
-							this.sendTo(obj.from, obj.command, dropDownEntry, obj.callback);
+							this.sendTo(obj.from, obj.command, Array.from(dropDownEntryByName.values()), obj.callback);
 						}
 						break;
 
 					case 'getApIP':
 						{
-							const dropDownEntry = [];
+							const dropDownEntryByIp = new Map<string, { label: string; value: string }>();
+							for (const configuredAccessPoint of this.getConfiguredAccessPoints()) {
+								dropDownEntryByIp.set(configuredAccessPoint.ip, {
+									label: configuredAccessPoint.ip,
+									value: configuredAccessPoint.ip,
+								});
+							}
 							for (const device in apConnection) {
-								dropDownEntry.push({
+								dropDownEntryByIp.set(apConnection[device].ip, {
 									label: apConnection[device].ip,
 									value: apConnection[device].ip,
 								});
 							}
-							this.sendTo(obj.from, obj.command, dropDownEntry, obj.callback);
+							this.sendTo(obj.from, obj.command, Array.from(dropDownEntryByIp.values()), obj.callback);
 						}
 						break;
 
 					// Handle front-end messages to delete devices
 					case 'deleteAP':
 						messageResponse[obj.message['apIP']] = obj;
+						await this.removeConfiguredAccessPoint(obj.message['apIP']);
 						if (apConnection[obj.message['apIP']]) {
 							this.clearTagDatabaseRefreshTimer(obj.message['apIP']);
 							// Ensure all existing connections are closed, will trigger disconnect event to clean-up memory attributes
@@ -416,14 +469,10 @@ class OpenEpaperLink extends utils.Adapter {
 							this.sendTo(
 								obj.from,
 								obj.command,
-								{
-									error: `Provided IP-Address ${JSON.stringify(
-										obj.message,
-									)} unknown, please refresh table and enter an valid IP-Address`,
-								},
+								{ result: 'OK - Device removed from configuration' },
 								obj.callback,
 							);
-							return;
+							delete messageResponse[obj.message['apIP']];
 						}
 
 						// this.sendTo(obj.from, obj.command, 1, obj.callback);
@@ -443,6 +492,62 @@ class OpenEpaperLink extends utils.Adapter {
 		return /^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(
 			ipAddress,
 		);
+	}
+
+	private getConfiguredAccessPoints(): ConfiguredAccessPoint[] {
+		const configuredTable = Array.isArray(this.config.accessPointTable) ? this.config.accessPointTable : [];
+		const entriesByIp = new Map<string, ConfiguredAccessPoint>();
+
+		for (const entry of configuredTable) {
+			if (!entry || typeof entry !== 'object') {
+				continue;
+			}
+
+			const ip = String((entry as Record<string, unknown>).ip ?? '').trim();
+			const apName = String((entry as Record<string, unknown>).apName ?? '').trim();
+			if (!ip || !apName || !this.validateIPAddress(ip)) {
+				continue;
+			}
+
+			entriesByIp.set(ip, { ip, apName });
+		}
+
+		return Array.from(entriesByIp.values());
+	}
+
+	private async saveConfiguredAccessPoints(accessPoints: ConfiguredAccessPoint[]): Promise<void> {
+		const normalizedAccessPoints = accessPoints.map((entry) => ({
+			apName: entry.apName,
+			ip: entry.ip,
+		}));
+
+		const instanceObjectId = `system.adapter.${this.namespace}`;
+		const instanceObject = await this.getForeignObjectAsync(instanceObjectId);
+		if (!instanceObject) {
+			throw new Error(`Adapter instance object ${instanceObjectId} not found`);
+		}
+
+		instanceObject.native = instanceObject.native ?? {};
+		instanceObject.native.accessPointTable = normalizedAccessPoints;
+		await this.setForeignObjectAsync(instanceObjectId, instanceObject);
+
+		this.config.accessPointTable = normalizedAccessPoints;
+	}
+
+	private async upsertConfiguredAccessPoint(apName: string, ip: string): Promise<void> {
+		const configuredAccessPoints = this.getConfiguredAccessPoints().filter((entry) => entry.ip !== ip);
+		configuredAccessPoints.push({ apName: apName.trim(), ip: ip.trim() });
+		await this.saveConfiguredAccessPoints(configuredAccessPoints);
+	}
+
+	private async removeConfiguredAccessPoint(ip: string): Promise<void> {
+		const normalizedIp = String(ip ?? '').trim();
+		if (!normalizedIp) {
+			return;
+		}
+
+		const configuredAccessPoints = this.getConfiguredAccessPoints().filter((entry) => entry.ip !== normalizedIp);
+		await this.saveConfiguredAccessPoints(configuredAccessPoints);
 	}
 
 	private async refreshTagDatabase(deviceIP: string): Promise<void> {
